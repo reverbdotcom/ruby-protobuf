@@ -166,6 +166,8 @@ module Protobuf
       #
 
       def define_accessor
+        define_field_accessor
+
         if repeated?
           define_array_getter
           define_array_setter
@@ -175,77 +177,143 @@ module Protobuf
         end
       end
 
+      ##
+      # Example
+      #
+      # def records
+      #   field = self.class._field_records
+      #   @values[field.name] ||= ::Protobuf::Field::FieldArray.new(field)
+      # end
+      #
       def define_array_getter
-        field = self
-        method_name = field.getter
-
-        message_class.class_eval do
-          define_method(method_name) do
+        message_class.class_eval <<-RUBY, __FILE__, __LINE__ + 1
+          def #{getter}
+            field = self.class._field_#{getter}
             @values[field.name] ||= ::Protobuf::Field::FieldArray.new(field)
           end
-        end
+        RUBY
 
-        ::Protobuf.field_deprecator.deprecate_method(message_class, method_name) if field.deprecated?
+        ::Protobuf.field_deprecator.deprecate_method(message_class, getter) if deprecated?
       end
 
+      ##
+      # Example
+      #
+      #
+      # def records=(values)
+      #   field = self.class._field_records
+      #   if value.is_a?(Array)
+      #     value = value.dup
+      #     value.compact!
+      #   else
+      #     fail TypeError, <<-TYPE_ERROR
+      #       Expected repeated value of type '#{field.type_class}'
+      #       Got '#{value.class}' for repeated protobuf field #{field.name}
+      #     TYPE_ERROR
+      #   end
+      #
+      #   if value.nil? || (value.respond_to?(:empty?) && value.empty?)
+      #     @values.delete(field.name)
+      #   else
+      #     @values[field.name] ||= ::Protobuf::Field::FieldArray.new(field)
+      #     @values[field.name].replace(value)
+      #   end
+      # end
+      #
       def define_array_setter
-        field = self
-        method_name = field.setter
+        message_class.class_eval <<-RUBY, __FILE__, __LINE__ + 1
+          def #{setter}(value)
+            field = self.class._field_#{getter}
+            @values[field.name] ||= ::Protobuf::Field::FieldArray.new(field)
 
-        message_class.class_eval do
-          define_method(method_name) do |val|
-            if val.is_a?(Array)
-              val = val.dup
-              val.compact!
+            if value.is_a?(Array)
+              value = value.dup
+              value.compact!
             else
               fail TypeError, <<-TYPE_ERROR
-                Expected repeated value of type '#{field.type_class}'
-                Got '#{val.class}' for repeated protobuf field #{field.name}
+                Expected repeated value of type '\#{field.type_class}'
+                Got '\#{value.class}' for repeated protobuf field \#{field.name}
               TYPE_ERROR
             end
 
-            if val.nil? || (val.respond_to?(:empty?) && val.empty?)
+            if value.nil? || (value.respond_to?(:empty?) && value.empty?)
               @values.delete(field.name)
             else
               @values[field.name] ||= ::Protobuf::Field::FieldArray.new(field)
-              @values[field.name].replace(val)
+              @values[field.name].replace(value)
             end
           end
-        end
+        RUBY
 
-        ::Protobuf.field_deprecator.deprecate_method(message_class, method_name) if field.deprecated?
+        ::Protobuf.field_deprecator.deprecate_method(message_class, setter) if deprecated?
       end
 
-      def define_getter
-        field = self
-        method_name = field.getter
+      ##
+      # Example
+      #
+      # class << self
+      #   attr_accessor :_field_created_at
+      # end
+      #
+      def define_field_accessor
+        message_class.class_eval <<-RUBY, __FILE__, __LINE__ + 1
+          class << self
+            attr_accessor :_field_#{getter}
+          end
+        RUBY
 
-        message_class.class_eval do
-          define_method(method_name) do
+        setter_accessor_name = "_field_#{setter}"
+        message_class.send(setter_accessor_name, self)
+      end
+
+      ##
+      # Example
+      #
+      # def created_at
+      #   field = self.class._field_created_at
+      #   @values.fetch(field.name, field.default_value)
+      # end
+      #
+      def define_getter
+        message_class.class_eval <<-RUBY, __FILE__, __LINE__ + 1
+          def #{getter}
+            field = self.class._field_#{getter}
             @values.fetch(field.name, field.default_value)
           end
-        end
+        RUBY
 
-        ::Protobuf.field_deprecator.deprecate_method(message_class, method_name) if field.deprecated?
+        ::Protobuf.field_deprecator.deprecate_method(message_class, getter) if deprecated?
       end
 
+      ##
+      # Example
+      #
+      # def created_at=(value)
+      #   field = self.class._field_created_at
+      #   if value.nil? || (value.respond_to?(:empty?) && value.empty?)
+      #     @valueues.delete(field.name)
+      #   elsif field.acceptable?(value)
+      #     @valueues[field.name] = field.coerce!(value)
+      #   else
+      #     fail TypeError, "Unacceptable value #{value} for field #{field.name} of type #{field.type_class}"
+      #   end
+      # end
+      #
       def define_setter
-        field = self
-        method_name = field.setter
-
-        message_class.class_eval do
-          define_method(method_name) do |val|
-            if val.nil? || (val.respond_to?(:empty?) && val.empty?)
+        message_class.class_eval <<-RUBY, __FILE__, __LINE__ + 1
+          def #{setter}(value)
+            field = self.class._field_#{getter}
+            if value.nil? || (value.respond_to?(:empty?) && value.empty?)
               @values.delete(field.name)
-            elsif field.acceptable?(val)
-              @values[field.name] = field.coerce!(val)
+            elsif field.acceptable?(value)
+              @values[field.name] = field.coerce!(value)
             else
-              fail TypeError, "Unacceptable value #{val} for field #{field.name} of type #{field.type_class}"
+              fail TypeError, "Unacceptable value \#{value} for field \#{field.name} of type \#{field.type_class}"
             end
           end
-        end
+        RUBY
 
-        ::Protobuf.field_deprecator.deprecate_method(message_class, method_name) if field.deprecated?
+        ::Protobuf.field_deprecator.deprecate_method(message_class, setter) if deprecated?
       end
 
       def typed_default_value
