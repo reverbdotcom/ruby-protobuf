@@ -15,8 +15,7 @@ module Protobuf
           :beacon_interval => 5,
           :broadcast_beacons => false,
           :broadcast_busy => false,
-          :zmq_inproc => true,
-        }
+        }.freeze
 
         attr_accessor :options, :workers
         attr_reader :zmq_context
@@ -41,18 +40,6 @@ module Protobuf
           workers.all? { |thread| !!thread[:busy] }
         end
 
-        def backend_port
-          options[:worker_port] || frontend_port + 1
-        end
-
-        def backend_uri
-          if inproc?
-            "inproc://#{backend_ip}:#{backend_port}"
-          else
-            "tcp://#{backend_ip}:#{backend_port}"
-          end
-        end
-
         def beacon_interval
           [options[:beacon_interval].to_i, 1].max
         end
@@ -73,7 +60,7 @@ module Protobuf
         end
 
         def broadcast_beacons?
-          !brokerless? && options[:broadcast_beacons]
+          options[:broadcast_beacons]
         end
 
         def broadcast_busy?
@@ -106,10 +93,6 @@ module Protobuf
           Time.now.to_i >= next_beacon && broadcast_beacons?
         end
 
-        def brokerless?
-          !!options[:workers_only]
-        end
-
         def busy_worker_count
           workers.count { |thread| !!thread[:busy] }
         end
@@ -125,10 +108,6 @@ module Protobuf
 
         def frontend_uri
           "tcp://#{frontend_ip}:#{frontend_port}"
-        end
-
-        def inproc?
-          !!options[:zmq_inproc]
         end
 
         def maintenance_timeout
@@ -183,8 +162,8 @@ module Protobuf
           yield if block_given? # runs on startup
           wait_for_shutdown_signal
           broadcast_flatline if broadcast_beacons?
-          Thread.pass until reap_dead_workers.empty?
-          @broker_thread.join unless brokerless?
+          shutdown_workers
+          @broker_thread.join
         ensure
           @running = false
           teardown
@@ -246,7 +225,7 @@ module Protobuf
           loop do
             break if IO.select([@shutdown_r], nil, nil, timeout)
 
-            start_broker unless brokerless?
+            start_broker
             reap_dead_workers if reap_dead_workers?
             start_missing_workers
 
@@ -257,6 +236,21 @@ module Protobuf
             else
               broadcast_heartbeat
             end
+          end
+        end
+
+        def shutdown_workers
+          # First ensure the broker local queue is empty so we can kill the workers.
+          sleep 0.1 until @broker.empty?
+
+          # Wait for all the workers to finish their work.
+          sleep 0.1 until !all_workers_busy?
+
+          # Kill the workers. They will all be waiting to pop something from the queue.
+          until @workers.empty?
+            worker = @workers.shift
+            worker.kill
+            worker.join
           end
         end
 

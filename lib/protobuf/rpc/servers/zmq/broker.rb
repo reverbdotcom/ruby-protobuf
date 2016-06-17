@@ -13,7 +13,6 @@ module Protobuf
 
           init_zmq_context
           init_local_queue
-          init_backend_socket
           init_frontend_socket
           init_poller
         rescue
@@ -21,12 +20,15 @@ module Protobuf
           raise
         end
 
+        def empty?
+          local_queue.empty?
+        end
+
         def run
           @idle_workers = []
           @running = true
 
           loop do
-            process_local_queue
             rc = @poller.poll(broker_polling_milliseconds)
 
             # The server was shutdown and no requests are pending
@@ -34,8 +36,6 @@ module Protobuf
             # Something went wrong
             break if rc == -1
 
-            check_and_process_backend
-            process_local_queue # Fair ordering so queued requests get in before new requests
             check_and_process_frontend
           end
         ensure
@@ -47,26 +47,16 @@ module Protobuf
           @running && @server.running?
         end
 
-        private
-
-        def backend_poll_weight
-          @backend_poll_weight ||= [ENV["PB_ZMQ_SERVER_BACKEND_POLL_WEIGHT"].to_i, 1].max
+        def write_to_frontend(frames)
+          @frontend_socket_mutex.synchronize do
+            zmq_error_check(@frontend_socket.send_strings(frames))
+          end
         end
+
+      private
 
         def broker_polling_milliseconds
           @broker_polling_milliseconds ||= [ENV["PB_ZMQ_BROKER_POLLING_MILLISECONDS"].to_i, 500].max
-        end
-
-        def check_and_process_backend
-          readables_include_backend = @poller.readables.include?(@backend_socket)
-          message_count_read_from_backend = 0
-
-          while readables_include_backend && message_count_read_from_backend < backend_poll_weight
-            message_count_read_from_backend += 1
-            process_backend
-            @poller.poll_nonblock
-            readables_include_backend = @poller.readables.include?(@backend_socket)
-          end
         end
 
         def check_and_process_frontend
@@ -86,36 +76,23 @@ module Protobuf
           @frontend_poll_weight ||= [ENV["PB_ZMQ_SERVER_FRONTEND_POLL_WEIGHT"].to_i, 1].max
         end
 
-        def init_backend_socket
-          @backend_socket = @zmq_context.socket(ZMQ::ROUTER)
-          zmq_error_check(@backend_socket.bind(@server.backend_uri))
-        end
-
         def init_frontend_socket
+          @frontend_socket_mutex = ::Mutex.new
           @frontend_socket = @zmq_context.socket(ZMQ::ROUTER)
           zmq_error_check(@frontend_socket.bind(@server.frontend_uri))
         end
 
         def init_local_queue
-          @local_queue = []
+          @local_queue = ::Queue.new
         end
 
         def init_poller
           @poller = ZMQ::Poller.new
           @poller.register_readable(@frontend_socket)
-          @poller.register_readable(@backend_socket)
         end
 
         def init_zmq_context
-          if inproc?
-            @zmq_context = @server.zmq_context
-          else
-            @zmq_context = ZMQ::Context.new
-          end
-        end
-
-        def inproc?
-          !!@server.try(:inproc?)
+          @zmq_context = @server.zmq_context
         end
 
         def local_queue_available?
@@ -124,16 +101,6 @@ module Protobuf
 
         def local_queue_max_size
           @local_queue_max_size ||= [ENV["PB_ZMQ_SERVER_QUEUE_MAX_SIZE"].to_i, 5].max
-        end
-
-        def process_backend
-          worker, _ignore, *frames = read_from_backend
-
-          @idle_workers << worker
-
-          unless frames == [::Protobuf::Rpc::Zmq::WORKER_READY_MESSAGE]
-            write_to_frontend(frames)
-          end
         end
 
         def process_frontend
@@ -146,46 +113,20 @@ module Protobuf
               write_to_frontend([address, ::Protobuf::Rpc::Zmq::EMPTY_STRING, ::Protobuf::Rpc::Zmq::NO_WORKERS_AVAILABLE])
             end
           else
-            if @idle_workers.empty?
-              local_queue << [address, ::Protobuf::Rpc::Zmq::EMPTY_STRING, message].concat(frames)
-            else
-              write_to_backend([@idle_workers.shift, ::Protobuf::Rpc::Zmq::EMPTY_STRING].concat([address, ::Protobuf::Rpc::Zmq::EMPTY_STRING, message]).concat(frames))
-            end
+            local_queue << [address, ::Protobuf::Rpc::Zmq::EMPTY_STRING, message].concat(frames)
           end
-        end
-
-        def process_local_queue
-          return if local_queue.empty?
-          return if @idle_workers.empty?
-
-          write_to_backend([@idle_workers.shift, ::Protobuf::Rpc::Zmq::EMPTY_STRING].concat(local_queue.shift))
-          process_local_queue
-        end
-
-        def read_from_backend
-          frames = []
-          zmq_error_check(@backend_socket.recv_strings(frames))
-          frames
         end
 
         def read_from_frontend
           frames = []
-          zmq_error_check(@frontend_socket.recv_strings(frames))
+          @frontend_socket_mutex.synchronize do
+            zmq_error_check(@frontend_socket.recv_strings(frames))
+          end
           frames
         end
 
         def teardown
           @frontend_socket.try(:close)
-          @backend_socket.try(:close)
-          @zmq_context.try(:terminate) unless inproc?
-        end
-
-        def write_to_backend(frames)
-          zmq_error_check(@backend_socket.send_strings(frames))
-        end
-
-        def write_to_frontend(frames)
-          zmq_error_check(@frontend_socket.send_strings(frames))
         end
       end
     end
